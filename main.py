@@ -76,6 +76,12 @@ def health():
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     _ws_connections.append(ws)
+    # Send current state immediately so client gets first frame without waiting for next tick
+    try:
+        state = _state if _state is not None else get_initial_state()
+        await ws.send_text(json.dumps(state_to_telemetry(state)))
+    except Exception:
+        pass
     try:
         while True:
             raw = await ws.receive_text()
