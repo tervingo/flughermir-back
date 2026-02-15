@@ -23,18 +23,18 @@ POSITION_ABS_MAX = 100_000.0
 
 def get_initial_state() -> AircraftState:
     return AircraftState(
-        x=0.0, y=0.0, z=-10.0,  # 10 m altitude
-        u=30.0, v=0.0, w=0.0,
+        x=0.0, y=0.0, z=0.0,   # on runway, altitude 0
+        u=0.0, v=0.0, w=0.0,   # speed 0, no vertical speed
         phi=0.0, theta=0.0, psi=0.0,
         p=0.0, q=0.0, r=0.0,
-        throttle=0.3, elevator=0.0, aileron=0.0, rudder=0.0,
+        throttle=0.0, elevator=0.0, aileron=0.0, rudder=0.0,
     )
 
 
 def reset_sim() -> None:
     global _state
     _state = get_initial_state()
-    _control["throttle"] = 0.3
+    _control["throttle"] = 0.0
     _control["elevator"] = 0.0
     _control["aileron"] = 0.0
     _control["rudder"] = 0.0

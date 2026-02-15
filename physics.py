@@ -58,6 +58,7 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     weight = MASS * G
 
     # Body frame: X fwd, Z down. Lift opposes weight (along -Z), drag along -velocity (approx -X)
+    # On ground with no speed: no lift, only thrust for horizontal; vertical is ground reaction (handled below)
     fx = thrust - drag * (state.u / v_mag)
     fz = -lift * (state.u / v_mag) + weight * cos(state.theta)  # Z down: -lift component + weight
     ax = fx / MASS
@@ -88,6 +89,17 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     x_new = state.x + u_w * dt
     y_new = state.y + v_w * dt
     z_new = state.z + w_w * dt
+
+    # Ground: do not go below z=0 (altitude 0 = runway). Zero vertical velocity when on ground.
+    if z_new > 0:
+        z_new = 0.0
+        cphi_n, sphi_n = cos(phi_new), sin(phi_new)
+        cth_n, sth_n = cos(theta_new), sin(theta_new)
+        denom = cphi_n * cth_n
+        if abs(denom) > 0.01:
+            w_new = (sth_n * u_new - sphi_n * cth_n * v_new) / denom
+        else:
+            w_new = 0.0
 
     # Clamp to prevent divergence and OverflowError in state_to_telemetry
     u_new = max(-MAX_SPEED, min(MAX_SPEED, u_new))
