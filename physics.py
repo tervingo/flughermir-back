@@ -73,33 +73,36 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     theta_new = state.theta + q_new * dt
     psi_new = state.psi + r_new * dt
 
-    # Body velocity integration
-    u_new = state.u + ax * dt
-    v_new = state.v + ay * dt
-    w_new = state.w + az * dt
+    # Body velocity integration (still in current/old body frame)
+    u_int = state.u + ax * dt
+    v_int = state.v + ay * dt
+    w_int = state.w + az * dt
 
-    # Body to NED (world) rotation
+    # Current (old) body to NED: world velocity after integration step
     cphi, sphi = cos(state.phi), sin(state.phi)
     cth, sth = cos(state.theta), sin(state.theta)
     cpsi, spsi = cos(state.psi), sin(state.psi)
-    u_w = state.u * (cth * cpsi) + state.v * (sphi * sth * cpsi - cphi * spsi) + state.w * (cphi * sth * cpsi + sphi * spsi)
-    v_w = state.u * (cth * spsi) + state.v * (sphi * sth * spsi + cphi * cpsi) + state.w * (cphi * sth * spsi - sphi * cpsi)
-    w_w = state.u * (-sth) + state.v * (sphi * cth) + state.w * (cphi * cth)
+    u_w = u_int * (cth * cpsi) + v_int * (sphi * sth * cpsi - cphi * spsi) + w_int * (cphi * sth * cpsi + sphi * spsi)
+    v_w = u_int * (cth * spsi) + v_int * (sphi * sth * spsi + cphi * cpsi) + w_int * (cphi * sth * spsi - sphi * cpsi)
+    w_w = u_int * (-sth) + v_int * (sphi * cth) + w_int * (cphi * cth)
 
-    x_new = state.x + u_w * dt
-    y_new = state.y + v_w * dt
+    # Ground: do not go below z=0. Zero vertical velocity when on ground.
+    if state.z >= 0 and w_w > 0:
+        w_w = 0.0
     z_new = state.z + w_w * dt
-
-    # Ground: do not go below z=0 (altitude 0 = runway). Zero vertical velocity when on ground.
     if z_new > 0:
         z_new = 0.0
-        cphi_n, sphi_n = cos(phi_new), sin(phi_new)
-        cth_n, sth_n = cos(theta_new), sin(theta_new)
-        denom = cphi_n * cth_n
-        if abs(denom) > 0.01:
-            w_new = (sth_n * u_new - sphi_n * cth_n * v_new) / denom
-        else:
-            w_new = 0.0
+        w_w = 0.0
+    x_new = state.x + u_w * dt
+    y_new = state.y + v_w * dt
+
+    # Express world velocity (u_w, v_w, w_w) in NEW body frame so (u,v,w) stays consistent with orientation
+    cphi_n, sphi_n = cos(phi_new), sin(phi_new)
+    cth_n, sth_n = cos(theta_new), sin(theta_new)
+    cpsi_n, spsi_n = cos(psi_new), sin(psi_new)
+    u_new = u_w * (cth_n * cpsi_n) + v_w * (cth_n * spsi_n) + w_w * (-sth_n)
+    v_new = u_w * (sphi_n * sth_n * cpsi_n - cphi_n * spsi_n) + v_w * (sphi_n * sth_n * spsi_n + cphi_n * cpsi_n) + w_w * (sphi_n * cth_n)
+    w_new = u_w * (cphi_n * sth_n * cpsi_n + sphi_n * spsi_n) + v_w * (cphi_n * sth_n * spsi_n - sphi_n * cpsi_n) + w_w * (cphi_n * cth_n)
 
     # Clamp to prevent divergence and OverflowError in state_to_telemetry
     u_new = max(-MAX_SPEED, min(MAX_SPEED, u_new))
