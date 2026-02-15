@@ -30,7 +30,8 @@ class AircraftState:
 
 MASS = 1000.0
 WING_AREA = 16.2
-CL_ALPHA = 5.0
+CL0 = 1.1          # lift at zero alpha: ~weight at 30 m/s (0.5*1.225*30^2*16.2*1.1 ~ 9810 N)
+CL_ALPHA = 4.0     # per radian
 CD0 = 0.03
 K = 0.04
 THRUST_MAX = 3500.0
@@ -49,7 +50,7 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
         v_mag = 0.1
     alpha = state.theta - (state.w / v_mag if v_mag > 0.5 else 0)
     q_bar = 0.5 * 1.225 * v_mag * v_mag
-    cl = CL_ALPHA * alpha
+    cl = CL0 + CL_ALPHA * alpha
     cd = CD0 + K * cl * cl
     lift = q_bar * WING_AREA * cl
     drag = q_bar * WING_AREA * cd
