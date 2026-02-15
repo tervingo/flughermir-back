@@ -38,7 +38,8 @@ THRUST_MAX = 3500.0
 G = 9.81
 
 # Clamps to prevent divergence and overflow
-MAX_SPEED = 400.0          # m/s
+MAX_SPEED = 400.0          # m/s (hard ceiling for numerics)
+MAX_AIRSPEED_MS = 83.33    # 300 km/h — light aircraft never exceeds this
 MAX_ANGLE = pi
 MAX_ANGULAR_RATE = 4.0     # rad/s
 POS_LIMIT = 1e6            # m
@@ -104,7 +105,14 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     v_new = u_w * (sphi_n * sth_n * cpsi_n - cphi_n * spsi_n) + v_w * (sphi_n * sth_n * spsi_n + cphi_n * cpsi_n) + w_w * (sphi_n * cth_n)
     w_new = u_w * (cphi_n * sth_n * cpsi_n + sphi_n * spsi_n) + v_w * (cphi_n * sth_n * spsi_n - sphi_n * cpsi_n) + w_w * (cphi_n * cth_n)
 
-    # Clamp to prevent divergence and OverflowError in state_to_telemetry
+    # Cap airspeed to light-aircraft max (300 km/h): scale velocity vector, preserve direction
+    v_mag_new = sqrt(u_new * u_new + v_new * v_new + w_new * w_new)
+    if v_mag_new > MAX_AIRSPEED_MS and v_mag_new > 0.01:
+        scale = MAX_AIRSPEED_MS / v_mag_new
+        u_new *= scale
+        v_new *= scale
+        w_new *= scale
+    # Per-component clamp for numerics
     u_new = max(-MAX_SPEED, min(MAX_SPEED, u_new))
     v_new = max(-MAX_SPEED, min(MAX_SPEED, v_new))
     w_new = max(-MAX_SPEED, min(MAX_SPEED, w_new))
@@ -134,12 +142,12 @@ def state_to_telemetry(state: AircraftState) -> dict:
     if not all(isfinite(x) for x in (u, v, w)):
         v_mag = 0.0
     elif max(abs(u), abs(v), abs(w)) > 1e100:
-        v_mag = MAX_SPEED
+        v_mag = MAX_AIRSPEED_MS
     else:
         v_mag = sqrt(u * u + v * v + w * w)
         if not isfinite(v_mag):
-            v_mag = MAX_SPEED
-        v_mag = min(v_mag, MAX_SPEED)
+            v_mag = MAX_AIRSPEED_MS
+        v_mag = min(v_mag, MAX_AIRSPEED_MS)
     return {
         "x": state.x,
         "y": state.y,
