@@ -16,6 +16,10 @@ _state: AircraftState | None = None
 _control = {"throttle": 0.3, "elevator": 0.0, "aileron": 0.0, "rudder": 0.0}
 _ws_connections: list[WebSocket] = []
 
+# Auto-reset when outside these bounds (altitude in m, position in m)
+ALTITUDE_MIN, ALTITUDE_MAX = -200.0, 50000.0
+POSITION_ABS_MAX = 100_000.0
+
 
 def get_initial_state() -> AircraftState:
     return AircraftState(
@@ -27,6 +31,26 @@ def get_initial_state() -> AircraftState:
     )
 
 
+def reset_sim() -> None:
+    global _state
+    _state = get_initial_state()
+    _control["throttle"] = 0.3
+    _control["elevator"] = 0.0
+    _control["aileron"] = 0.0
+    _control["rudder"] = 0.0
+
+
+def _state_out_of_bounds() -> bool:
+    if _state is None:
+        return True
+    alt = -_state.z
+    if alt < ALTITUDE_MIN or alt > ALTITUDE_MAX:
+        return True
+    if abs(_state.x) > POSITION_ABS_MAX or abs(_state.y) > POSITION_ABS_MAX:
+        return True
+    return False
+
+
 async def physics_loop():
     global _state
     _state = get_initial_state()
@@ -35,6 +59,8 @@ async def physics_loop():
         await asyncio.sleep(dt)
         if _state is None:
             continue
+        if _state_out_of_bounds():
+            reset_sim()
         _state = AircraftState(
             **{**vars(_state), "throttle": _control["throttle"], "elevator": _control["elevator"],
                "aileron": _control["aileron"], "rudder": _control["rudder"]}
@@ -70,6 +96,13 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/reset")
+def reset():
+    """Reset simulation to initial state (e.g. after crash or runaway)."""
+    reset_sim()
+    return {"status": "reset"}
 
 
 @app.websocket("/ws")
