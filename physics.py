@@ -1,10 +1,11 @@
 """
 Minimal flight physics for MVP: 4 forces (lift, weight, thrust, drag) + Euler integration.
 SI units. Body frame: X forward, Y right, Z down (NED).
+State is clamped to sane limits so the sim never overflows or diverges.
 """
 
 from dataclasses import dataclass
-from math import sin, cos, sqrt
+from math import sin, cos, sqrt, isfinite, pi
 
 
 @dataclass
@@ -34,6 +35,12 @@ CD0 = 0.03
 K = 0.04
 THRUST_MAX = 3500.0
 G = 9.81
+
+# Clamps to prevent divergence and overflow
+MAX_SPEED = 400.0          # m/s
+MAX_ANGLE = pi
+MAX_ANGULAR_RATE = 4.0     # rad/s
+POS_LIMIT = 1e6            # m
 
 
 def update_physics(state: AircraftState, dt: float) -> AircraftState:
@@ -81,6 +88,20 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     y_new = state.y + v_w * dt
     z_new = state.z + w_w * dt
 
+    # Clamp to prevent divergence and OverflowError in state_to_telemetry
+    u_new = max(-MAX_SPEED, min(MAX_SPEED, u_new))
+    v_new = max(-MAX_SPEED, min(MAX_SPEED, v_new))
+    w_new = max(-MAX_SPEED, min(MAX_SPEED, w_new))
+    phi_new = max(-MAX_ANGLE, min(MAX_ANGLE, phi_new))
+    theta_new = max(-MAX_ANGLE, min(MAX_ANGLE, theta_new))
+    psi_new = psi_new % (2 * pi) if isfinite(psi_new) else 0.0
+    p_new = max(-MAX_ANGULAR_RATE, min(MAX_ANGULAR_RATE, p_new))
+    q_new = max(-MAX_ANGULAR_RATE, min(MAX_ANGULAR_RATE, q_new))
+    r_new = max(-MAX_ANGULAR_RATE, min(MAX_ANGULAR_RATE, r_new))
+    x_new = max(-POS_LIMIT, min(POS_LIMIT, x_new))
+    y_new = max(-POS_LIMIT, min(POS_LIMIT, y_new))
+    z_new = max(-POS_LIMIT, min(POS_LIMIT, z_new))
+
     return AircraftState(
         x=x_new, y=y_new, z=z_new,
         u=u_new, v=v_new, w=w_new,
@@ -92,7 +113,17 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
 
 
 def state_to_telemetry(state: AircraftState) -> dict:
-    v_mag = sqrt(state.u**2 + state.v**2 + state.w**2)
+    # Safe airspeed: avoid OverflowError when state has blown up (no squaring if too large)
+    u, v, w = state.u, state.v, state.w
+    if not all(isfinite(x) for x in (u, v, w)):
+        v_mag = 0.0
+    elif max(abs(u), abs(v), abs(w)) > 1e100:
+        v_mag = MAX_SPEED
+    else:
+        v_mag = sqrt(u * u + v * v + w * w)
+        if not isfinite(v_mag):
+            v_mag = MAX_SPEED
+        v_mag = min(v_mag, MAX_SPEED)
     return {
         "x": state.x,
         "y": state.y,
