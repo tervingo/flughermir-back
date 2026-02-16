@@ -1,5 +1,6 @@
 """
 FastAPI server: WebSocket for telemetry + control. Physics loop at ~60 Hz.
+Uses JSBSim for realistic flight dynamics.
 """
 
 import asyncio
@@ -9,11 +10,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from physics import AircraftState, update_physics, state_to_telemetry
+from jsbsim_wrapper import JSBSimWrapper
 
-# Global state for the sim (single aircraft)
-_state: AircraftState | None = None
-_control = {"throttle": 0.3, "elevator": 0.0, "aileron": 0.0, "rudder": 0.0}
+# Global JSBSim instance
+_jsbsim: JSBSimWrapper | None = None
+_control = {"throttle": 0.0, "elevator": 0.0, "aileron": 0.0, "rudder": 0.0}
 _ws_connections: list[WebSocket] = []
 
 # Auto-reset when outside these bounds (altitude in m, position in m)
@@ -21,60 +22,70 @@ ALTITUDE_MIN, ALTITUDE_MAX = -200.0, 50000.0
 POSITION_ABS_MAX = 100_000.0
 
 
-def get_initial_state() -> AircraftState:
-    return AircraftState(
-        x=0.0, y=0.0, z=0.0,   # on runway, altitude 0
-        u=0.0, v=0.0, w=0.0,   # speed 0, no vertical speed
-        phi=0.0, theta=0.0, psi=0.0,
-        p=0.0, q=0.0, r=0.0,
-        throttle=0.0, elevator=0.0, aileron=0.0, rudder=0.0,
-    )
-
-
 def reset_sim() -> None:
-    global _state
-    _state = get_initial_state()
+    global _jsbsim
+    if _jsbsim is None:
+        _jsbsim = JSBSimWrapper("c172x")
+    _jsbsim.reset()
     _control["throttle"] = 0.0
     _control["elevator"] = 0.0
     _control["aileron"] = 0.0
     _control["rudder"] = 0.0
 
 
-def _state_out_of_bounds() -> bool:
-    if _state is None:
+def _state_out_of_bounds(state: dict) -> bool:
+    if not state:
         return True
-    alt = -_state.z
+    alt = state.get("altitude", 0.0)
     if alt < ALTITUDE_MIN or alt > ALTITUDE_MAX:
         return True
-    if abs(_state.x) > POSITION_ABS_MAX or abs(_state.y) > POSITION_ABS_MAX:
+    x, y = state.get("x", 0.0), state.get("y", 0.0)
+    if abs(x) > POSITION_ABS_MAX or abs(y) > POSITION_ABS_MAX:
         return True
     return False
 
 
 async def physics_loop():
-    global _state
-    _state = get_initial_state()
+    global _jsbsim
+    _jsbsim = JSBSimWrapper("c172x")
+    _jsbsim.initialize(altitude_m=0.0, heading_deg=0.0, airspeed_ms=0.0)
     dt = 1.0 / 60.0
     while True:
         await asyncio.sleep(dt)
-        if _state is None:
+        if _jsbsim is None:
             continue
-        if _state_out_of_bounds():
+        try:
+            # Set controls
+            _jsbsim.set_controls(
+                _control["throttle"],
+                _control["elevator"],
+                _control["aileron"],
+                _control["rudder"]
+            )
+            # Step simulation
+            if not _jsbsim.step():
+                # Simulation failed, reset
+                reset_sim()
+                continue
+            # Get state
+            state = _jsbsim.get_state()
+            # Check bounds
+            if _state_out_of_bounds(state):
+                reset_sim()
+                state = _jsbsim.get_state()
+            # Send telemetry
+            msg = json.dumps(state)
+            dead = []
+            for ws in _ws_connections:
+                try:
+                    await ws.send_text(msg)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                _ws_connections.remove(ws)
+        except Exception as e:
+            # On error, reset
             reset_sim()
-        _state = AircraftState(
-            **{**vars(_state), "throttle": _control["throttle"], "elevator": _control["elevator"],
-               "aileron": _control["aileron"], "rudder": _control["rudder"]}
-        )
-        _state = update_physics(_state, dt)
-        msg = json.dumps(state_to_telemetry(_state))
-        dead = []
-        for ws in _ws_connections:
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            _ws_connections.remove(ws)
 
 
 @asynccontextmanager
@@ -111,8 +122,10 @@ async def websocket_endpoint(ws: WebSocket):
     _ws_connections.append(ws)
     # Send current state immediately so client gets first frame without waiting for next tick
     try:
-        state = _state if _state is not None else get_initial_state()
-        await ws.send_text(json.dumps(state_to_telemetry(state)))
+        if _jsbsim is None:
+            reset_sim()
+        state = _jsbsim.get_state() if _jsbsim else {}
+        await ws.send_text(json.dumps(state))
     except Exception:
         pass
     try:
