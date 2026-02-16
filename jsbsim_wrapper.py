@@ -35,7 +35,7 @@ class JSBSimWrapper:
     def initialize(self, altitude_m: float = 0.0, heading_deg: float = 0.0, airspeed_ms: float = 0.0):
         """Initialize aircraft state (on runway, ready for takeoff)."""
         try:
-            # Set initial conditions
+            # Set initial conditions - ensure aircraft is on ground
             self.fdm["ic/h-sl-ft"] = altitude_m * 3.28084  # m to ft
             self.fdm["ic/long-gc-deg"] = 0.0
             self.fdm["ic/lat-gc-deg"] = 0.0
@@ -47,9 +47,45 @@ class JSBSimWrapper:
             self.fdm["ic/theta-deg"] = 0.0
             self.fdm["ic/alpha-deg"] = 0.0
             self.fdm["ic/beta-deg"] = 0.0
+            
+            # Ensure gear is down and locked
+            try:
+                self.fdm["gear/gear-cmd-norm"] = 1.0  # Gear down
+            except (KeyError, AttributeError):
+                pass  # Some aircraft models may not have this property
+            
             self.fdm.run_ic()
+            
+            # Stabilize on ground by running multiple steps with zero controls
+            # This allows the aircraft to settle on the ground and stop bouncing
+            self.fdm["fcs/throttle-cmd-norm"] = 0.0
+            self.fdm["fcs/elevator-cmd-norm"] = 0.0
+            self.fdm["fcs/aileron-cmd-norm"] = 0.0
+            self.fdm["fcs/rudder-cmd-norm"] = 0.0
+            
+            # Run multiple steps to stabilize - check if on ground
+            settled = False
+            for i in range(30):  # More steps to ensure stability
+                self.fdm.run()
+                # Check if aircraft is on ground (altitude AGL should be near zero)
+                try:
+                    alt_agl_ft = self.fdm["position/altitude-agl-ft"]
+                    if alt_agl_ft < 0.1:  # Very close to ground
+                        settled = True
+                        break  # Aircraft has settled
+                except (KeyError, AttributeError):
+                    pass  # Property may not exist, continue stabilizing
+            
+            # Log final state
+            try:
+                final_alt = self._get_property("position/altitude-agl-ft", 0.0)
+                final_vt = self._get_property("velocities/vt-fps", 0.0)
+                logger.info(f"JSBSim initialized: altitude AGL={final_alt*0.3048:.2f}m, speed={final_vt*0.3048:.2f}m/s, settled={settled}")
+            except:
+                pass
+            
             self.initialized = True
-            logger.info("JSBSim aircraft state initialized successfully")
+            logger.info("JSBSim aircraft state initialized and stabilized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize aircraft state: {e}", exc_info=True)
             self.initialized = False
@@ -163,4 +199,11 @@ class JSBSimWrapper:
 
     def reset(self):
         """Reset to initial state."""
-        self.initialize(altitude_m=0.0, heading_deg=0.0, airspeed_ms=0.0)
+        try:
+            # Stop the simulation first
+            self.initialized = False
+            # Reinitialize
+            self.initialize(altitude_m=0.0, heading_deg=0.0, airspeed_ms=0.0)
+        except Exception as e:
+            logger.error(f"Failed to reset JSBSim: {e}", exc_info=True)
+            raise

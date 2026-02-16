@@ -45,6 +45,7 @@ def get_initial_state():
 
 def reset_sim() -> None:
     global _jsbsim, _state
+    # Reset controls first
     _control["throttle"] = 0.0
     _control["elevator"] = 0.0
     _control["aileron"] = 0.0
@@ -53,6 +54,9 @@ def reset_sim() -> None:
         try:
             if _jsbsim is None:
                 _jsbsim = JSBSimWrapper("c172x")
+            # Ensure controls are zero before reset
+            if _jsbsim.initialized:
+                _jsbsim.set_controls(0.0, 0.0, 0.0, 0.0)
             _jsbsim.reset()
         except Exception as e:
             import logging
