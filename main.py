@@ -12,6 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import os
 
+# Always import manual physics as fallback
+from physics import AircraftState, update_physics, state_to_telemetry
+
 # Allow forcing manual physics via environment variable
 FORCE_MANUAL_PHYSICS = os.environ.get("FORCE_MANUAL_PHYSICS", "false").lower() == "true"
 
@@ -27,7 +30,6 @@ except ImportError as e:
     else:
         logging.warning(f"JSBSim not available, falling back to manual physics: {e}")
     JSBSIM_AVAILABLE = False
-    from physics import AircraftState, update_physics, state_to_telemetry
 
 # Global state
 _jsbsim = None
