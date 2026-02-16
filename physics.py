@@ -28,14 +28,15 @@ class AircraftState:
     rudder: float
 
 
-MASS = 1000.0
+MASS = 1000.0       # kg (light aircraft)
+G = 9.81            # m/s^2
+WEIGHT = MASS * G   # N — downward force; lift must balance this in level flight
 WING_AREA = 16.2
-CL0 = 1.1          # lift at zero alpha: ~weight at 30 m/s (0.5*1.225*30^2*16.2*1.1 ~ 9810 N)
+CL0 = 1.1          # lift at zero alpha: ~weight at 30 m/s
 CL_ALPHA = 4.0     # per radian
-CD0 = 0.03
-K = 0.04
-THRUST_MAX = 3500.0
-G = 9.81
+CD0 = 0.035         # parasitic drag
+K = 0.03            # induced drag factor
+THRUST_MAX = 2800.0 # N — max thrust; 50% throttle ≈ 1400 N should balance ~45-50 m/s (162-180 km/h)
 
 # Clamps to prevent divergence and overflow
 MAX_SPEED = 400.0          # m/s (hard ceiling for numerics)
@@ -56,12 +57,16 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     lift = q_bar * WING_AREA * cl
     drag = q_bar * WING_AREA * cd
     thrust = THRUST_MAX * state.throttle
-    weight = MASS * G
 
-    # Body frame: X fwd, Z down. Lift opposes weight (along -Z), drag along -velocity (approx -X)
-    # On ground with no speed: no lift, only thrust for horizontal; vertical is ground reaction (handled below)
-    fx = thrust - drag * (state.u / v_mag)
-    fz = -lift * (state.u / v_mag) + weight * cos(state.theta)  # Z down: -lift component + weight
+    # Body frame: X fwd, Z down. Drag opposes velocity vector (mostly along X when level)
+    # Drag force magnitude = drag, direction = opposite to velocity in body frame
+    # For small angles, drag_x ≈ -drag * (u/v_mag), drag_z ≈ -drag * (w/v_mag)
+    drag_x = drag * (state.u / v_mag) if v_mag > 0.1 else 0.0
+    drag_z = drag * (state.w / v_mag) if v_mag > 0.1 else 0.0
+    fx = thrust - drag_x
+    # Lift acts perpendicular to velocity (approx along -Z when level), weight always down
+    lift_z = lift * (state.u / v_mag) if v_mag > 0.1 else 0.0  # lift component along body Z (up = -Z)
+    fz = -lift_z - drag_z + WEIGHT * cos(state.theta)  # Z down: -lift - drag_z + weight
     ax = fx / MASS
     az = fz / MASS
     ay = 0.0
