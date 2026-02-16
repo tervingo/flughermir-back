@@ -28,3 +28,19 @@ The physics loop runs at 60 Hz using JSBSim whether or not any client is connect
 ## JSBSim
 
 Uses JSBSim Python bindings (installed via `pip install JSBSim`). The default aircraft model is `c172x` (Cessna 172). To use a different model, change the aircraft name in `main.py` (e.g., `JSBSimWrapper("f15")`).
+
+### Known Issues
+
+JSBSim may have issues with:
+- Controls not responding correctly (throttle not increasing speed)
+- Excessive bouncing on ground
+- Property access failures
+
+The system automatically detects these issues and falls back to manual physics. You can also force manual physics by setting the environment variable:
+
+```bash
+export FORCE_MANUAL_PHYSICS=true
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+The manual physics engine provides a simpler but functional flight model that works reliably.

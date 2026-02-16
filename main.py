@@ -10,12 +10,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+import os
+
+# Allow forcing manual physics via environment variable
+FORCE_MANUAL_PHYSICS = os.environ.get("FORCE_MANUAL_PHYSICS", "false").lower() == "true"
+
 try:
+    if FORCE_MANUAL_PHYSICS:
+        raise ImportError("Manual physics forced via FORCE_MANUAL_PHYSICS environment variable")
     from jsbsim_wrapper import JSBSimWrapper
     JSBSIM_AVAILABLE = True
 except ImportError as e:
     import logging
-    logging.warning(f"JSBSim not available, falling back to manual physics: {e}")
+    if FORCE_MANUAL_PHYSICS:
+        logging.info("Using manual physics (forced via environment variable)")
+    else:
+        logging.warning(f"JSBSim not available, falling back to manual physics: {e}")
     JSBSIM_AVAILABLE = False
     from physics import AircraftState, update_physics, state_to_telemetry
 
@@ -98,17 +108,33 @@ async def physics_loop():
             else:
                 # Test JSBSim: set throttle to 50% and run a few steps, check if speed increases
                 import logging
+                logging.info("Testing JSBSim functionality...")
                 _jsbsim.set_controls(0.5, 0.0, 0.0, 0.0)
-                for _ in range(60):  # 1 second at 60Hz
+                initial_state = _jsbsim.get_state()
+                initial_speed = initial_state.get("airspeed", 0.0)
+                logging.info(f"Initial state: speed={initial_speed:.2f} m/s")
+                
+                for i in range(60):  # 1 second at 60Hz
                     if not _jsbsim.step():
+                        logging.error(f"JSBSim step failed during test at step {i}")
                         break
+                    if i % 20 == 0:  # Log every 1/3 second
+                        test_state = _jsbsim.get_state()
+                        test_speed = test_state.get("airspeed", 0.0)
+                        test_throttle = test_state.get("throttle", 0.0)
+                        logging.info(f"Test step {i}: speed={test_speed:.2f} m/s, throttle={test_throttle:.2f}")
+                
                 test_state_after = _jsbsim.get_state()
                 test_speed = test_state_after.get("airspeed", 0.0)
-                if test_speed < 1.0:  # Should have some speed after 1 second at 50% throttle
-                    logging.warning(f"JSBSim test: throttle 50% but speed={test_speed:.2f} m/s after 1s, switching to manual physics")
+                speed_increase = test_speed - initial_speed
+                logging.info(f"JSBSim test result: initial={initial_speed:.2f} m/s, final={test_speed:.2f} m/s, increase={speed_increase:.2f} m/s")
+                
+                if test_speed < 2.0 or speed_increase < 0.5:  # Should have some speed increase after 1 second at 50% throttle
+                    logging.error(f"JSBSim FAILED TEST: throttle 50% but speed={test_speed:.2f} m/s (increase={speed_increase:.2f}) after 1s, switching to manual physics")
                     _jsbsim = None
                 else:
                     # Reset after test
+                    logging.info("JSBSim test passed, resetting to initial state")
                     _jsbsim.reset()
         except Exception as e:
             import logging
@@ -158,17 +184,19 @@ async def physics_loop():
                 airspeed = state.get("airspeed", 0.0)
                 altitude = state.get("altitude", 0.0)
                 
-                # If throttle > 50% for more than 2 seconds but speed < 5 m/s, switch to manual
-                if throttle > 0.5 and airspeed < 5.0:
+                # More aggressive detection: if throttle > 30% for more than 1 second but speed < 3 m/s, switch to manual
+                if throttle > 0.3 and airspeed < 3.0:
                     if not hasattr(physics_loop, '_jsbsim_slow_speed_count'):
                         physics_loop._jsbsim_slow_speed_count = 0
                     physics_loop._jsbsim_slow_speed_count += 1
-                    if physics_loop._jsbsim_slow_speed_count > 120:  # ~2 seconds at 60Hz
+                    if physics_loop._jsbsim_slow_speed_count > 60:  # ~1 second at 60Hz
                         import logging
-                        logging.warning(f"JSBSim: throttle={throttle:.2f} but speed={airspeed:.2f} m/s, switching to manual physics")
+                        logging.error(f"JSBSim FAILURE DETECTED: throttle={throttle:.2f} but speed={airspeed:.2f} m/s after 1s, switching to manual physics")
                         _jsbsim = None
                         _state = get_initial_state()
                         physics_loop._jsbsim_slow_speed_count = 0
+                        # Force state to indicate manual physics
+                        state["physics_engine"] = "manual"
                         continue
                 else:
                     physics_loop._jsbsim_slow_speed_count = 0
@@ -228,6 +256,73 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug/jsbsim")
+def debug_jsbsim():
+    """Debug endpoint to check JSBSim status and properties."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if not JSBSIM_AVAILABLE:
+        return {
+            "jsbsim_available": False,
+            "reason": "JSBSim not imported",
+            "using_manual_physics": True
+        }
+    
+    if _jsbsim is None:
+        return {
+            "jsbsim_available": True,
+            "jsbsim_initialized": False,
+            "reason": "JSBSim wrapper not created",
+            "using_manual_physics": True
+        }
+    
+    try:
+        state = _jsbsim.get_state()
+        # Try to read various properties
+        diagnostics = {
+            "jsbsim_available": True,
+            "jsbsim_initialized": _jsbsim.initialized,
+            "physics_engine": state.get("physics_engine", "unknown"),
+            "current_state": {
+                "altitude": state.get("altitude", 0.0),
+                "airspeed": state.get("airspeed", 0.0),
+                "throttle": state.get("throttle", 0.0),
+            },
+            "controls": _control.copy(),
+        }
+        
+        # Try to read engine properties
+        try:
+            diagnostics["engine"] = {
+                "running": _jsbsim._get_property("propulsion/engine/engine-running", None),
+                "rpm": _jsbsim._get_property("propulsion/engine/engine-rpm", None),
+                "thrust": _jsbsim._get_property("propulsion/engine/thrust-lbs", None),
+            }
+        except:
+            diagnostics["engine"] = "Could not read engine properties"
+        
+        # Try to read throttle properties
+        try:
+            diagnostics["throttle_properties"] = {}
+            for prop in ["fcs/throttle-cmd-norm", "fcs/throttle-pos-norm", "propulsion/engine/throttle"]:
+                try:
+                    diagnostics["throttle_properties"][prop] = _jsbsim._get_property(prop, None)
+                except:
+                    diagnostics["throttle_properties"][prop] = "not available"
+        except:
+            diagnostics["throttle_properties"] = "Could not read throttle properties"
+        
+        return diagnostics
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}", exc_info=True)
+        return {
+            "jsbsim_available": True,
+            "error": str(e),
+            "using_manual_physics": True
+        }
 
 
 @app.post("/reset")
