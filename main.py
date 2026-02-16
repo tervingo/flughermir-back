@@ -95,6 +95,21 @@ async def physics_loop():
                 import logging
                 logging.warning("JSBSim initialized but properties not accessible, falling back to manual physics")
                 _jsbsim = None
+            else:
+                # Test JSBSim: set throttle to 50% and run a few steps, check if speed increases
+                import logging
+                _jsbsim.set_controls(0.5, 0.0, 0.0, 0.0)
+                for _ in range(60):  # 1 second at 60Hz
+                    if not _jsbsim.step():
+                        break
+                test_state_after = _jsbsim.get_state()
+                test_speed = test_state_after.get("airspeed", 0.0)
+                if test_speed < 1.0:  # Should have some speed after 1 second at 50% throttle
+                    logging.warning(f"JSBSim test: throttle 50% but speed={test_speed:.2f} m/s after 1s, switching to manual physics")
+                    _jsbsim = None
+                else:
+                    # Reset after test
+                    _jsbsim.reset()
         except Exception as e:
             import logging
             logging.error(f"JSBSim initialization failed: {e}")
@@ -126,6 +141,7 @@ async def physics_loop():
                         reset_sim()
                     continue
                 state = _jsbsim.get_state()
+                
                 # Check if state is valid (not all zeros due to property access failure)
                 if state.get("altitude") == 0.0 and state.get("airspeed") == 0.0 and state.get("phi_deg") == 0.0:
                     jsbsim_failed_count += 1
@@ -136,8 +152,28 @@ async def physics_loop():
                         _state = get_initial_state()
                     else:
                         continue
+                
+                # Detect problematic JSBSim behavior: throttle high but speed zero/low
+                throttle = _control.get("throttle", 0.0)
+                airspeed = state.get("airspeed", 0.0)
+                altitude = state.get("altitude", 0.0)
+                
+                # If throttle > 50% for more than 2 seconds but speed < 5 m/s, switch to manual
+                if throttle > 0.5 and airspeed < 5.0:
+                    if not hasattr(physics_loop, '_jsbsim_slow_speed_count'):
+                        physics_loop._jsbsim_slow_speed_count = 0
+                    physics_loop._jsbsim_slow_speed_count += 1
+                    if physics_loop._jsbsim_slow_speed_count > 120:  # ~2 seconds at 60Hz
+                        import logging
+                        logging.warning(f"JSBSim: throttle={throttle:.2f} but speed={airspeed:.2f} m/s, switching to manual physics")
+                        _jsbsim = None
+                        _state = get_initial_state()
+                        physics_loop._jsbsim_slow_speed_count = 0
+                        continue
                 else:
-                    jsbsim_failed_count = 0  # Reset failure count on success
+                    physics_loop._jsbsim_slow_speed_count = 0
+                
+                jsbsim_failed_count = 0  # Reset failure count on success
             else:
                 # Manual physics fallback
                 if _state is None:

@@ -28,19 +28,24 @@ class JSBSimWrapper:
             # This prevents the "unable to open file" error
             # JSBSim will write to this file but we don't need to read it
             try:
-                # Try current directory first
+                # Try current directory first (where JSBSim will look)
                 output_file = "JSBout172B.csv"
-                with open(output_file, 'w') as f:
+                # Get the current working directory
+                cwd = os.getcwd()
+                output_path = os.path.join(cwd, output_file)
+                with open(output_path, 'w') as f:
                     pass  # Create empty file
-            except (PermissionError, OSError):
+                logger.debug(f"Created JSBSim output file: {output_path}")
+            except (PermissionError, OSError) as e:
                 try:
-                    # If that fails, try temp directory
+                    # If that fails, try temp directory and create a symlink or change directory
                     temp_dir = tempfile.gettempdir()
                     output_file = os.path.join(temp_dir, "JSBout172B.csv")
                     with open(output_file, 'w') as f:
                         pass
-                except Exception as e:
-                    logger.debug(f"Could not create JSBSim output file: {e}")
+                    logger.debug(f"Created JSBSim output file in temp: {output_file}")
+                except Exception as e2:
+                    logger.debug(f"Could not create JSBSim output file: {e}, {e2}")
             
             # Try to disable CSV output (if possible)
             try:
