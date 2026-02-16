@@ -22,12 +22,14 @@ class JSBSimWrapper:
             # FGFDMExec requires root directory path (empty string uses default)
             root_dir = os.environ.get("JSBSIM_ROOT", "")
             self.fdm = FGFDMExec(root_dir) if root_dir else FGFDMExec("")
+            logger.info(f"Loading JSBSim aircraft model: {aircraft}")
             self.fdm.load_model(aircraft)
             self.dt = 1.0 / 60.0  # 60 Hz
             self.fdm.set_dt(self.dt)  # Set timestep
             self.initialized = False
+            logger.info(f"JSBSim initialized successfully with aircraft {aircraft}")
         except Exception as e:
-            logger.error(f"Failed to initialize JSBSim with aircraft {aircraft}: {e}")
+            logger.error(f"Failed to initialize JSBSim with aircraft {aircraft}: {e}", exc_info=True)
             raise
 
     def initialize(self, altitude_m: float = 0.0, heading_deg: float = 0.0, airspeed_ms: float = 0.0):
@@ -47,17 +49,21 @@ class JSBSimWrapper:
             self.fdm["ic/beta-deg"] = 0.0
             self.fdm.run_ic()
             self.initialized = True
+            logger.info("JSBSim aircraft state initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize aircraft state: {e}")
+            logger.error(f"Failed to initialize aircraft state: {e}", exc_info=True)
             self.initialized = False
             raise
 
     def set_controls(self, throttle: float, elevator: float, aileron: float, rudder: float):
         """Set control surfaces (all normalized -1..1, throttle 0..1)."""
-        self.fdm["fcs/throttle-cmd-norm"] = max(0.0, min(1.0, throttle))
-        self.fdm["fcs/elevator-cmd-norm"] = max(-1.0, min(1.0, elevator))
-        self.fdm["fcs/aileron-cmd-norm"] = max(-1.0, min(1.0, aileron))
-        self.fdm["fcs/rudder-cmd-norm"] = max(-1.0, min(1.0, rudder))
+        try:
+            self.fdm["fcs/throttle-cmd-norm"] = max(0.0, min(1.0, throttle))
+            self.fdm["fcs/elevator-cmd-norm"] = max(-1.0, min(1.0, elevator))
+            self.fdm["fcs/aileron-cmd-norm"] = max(-1.0, min(1.0, aileron))
+            self.fdm["fcs/rudder-cmd-norm"] = max(-1.0, min(1.0, rudder))
+        except (KeyError, AttributeError) as e:
+            logger.warning(f"Failed to set controls: {e}")
 
     def step(self) -> bool:
         """Advance simulation by one timestep. Returns True if successful."""
@@ -69,46 +75,79 @@ class JSBSimWrapper:
             logger.error(f"JSBSim step failed: {e}")
             return False
 
+    def _get_property(self, prop_name: str, default=None):
+        """Safely get a JSBSim property with fallback."""
+        try:
+            value = self.fdm[prop_name]
+            return value
+        except (KeyError, AttributeError, TypeError) as e:
+            # Only log first few failures to avoid spam
+            if not hasattr(self, '_logged_props'):
+                self._logged_props = set()
+            if prop_name not in self._logged_props and len(self._logged_props) < 5:
+                logger.debug(f"Property {prop_name} not available: {e}")
+                self._logged_props.add(prop_name)
+            return default
+    
     def get_state(self) -> dict:
         """Extract current aircraft state for telemetry."""
         # JSBSim uses NED frame, feet, degrees
         # Convert to SI units (meters, m/s, degrees)
-        try:
-            # Try common property names
-            x_ft = self.fdm["position/local-x-ft"]
-            y_ft = self.fdm["position/local-y-ft"]
-            z_ft = self.fdm["position/local-z-ft"]
-            alt_ft = self.fdm["position/altitude-agl-ft"]
-            phi = self.fdm["attitude/phi-deg"]
-            theta = self.fdm["attitude/theta-deg"]
-            psi = self.fdm["attitude/psi-deg"]
-            u_fps = self.fdm["velocities/u-fps"]
-            v_fps = self.fdm["velocities/v-fps"]
-            w_fps = self.fdm["velocities/w-fps"]
-            h_dot_fps = self.fdm["velocities/h-dot-fps"]
-            p_rad = self.fdm["velocities/p-rad_sec"]
-            q_rad = self.fdm["velocities/q-rad_sec"]
-            r_rad = self.fdm["velocities/r-rad_sec"]
-            # True airspeed (better than just u)
-            tas_fps = self.fdm["velocities/vt-fps"]
-            throttle = self.fdm["fcs/throttle-cmd-norm"]
-        except (KeyError, AttributeError, TypeError) as e:
-            # Fallback if properties don't exist
-            logger.warning(f"JSBSim property access failed, using fallback: {e}")
-            return {
-                "x": 0.0, "y": 0.0, "z": 0.0,
-                "altitude": 0.0,
-                "phi_deg": 0.0, "theta_deg": 0.0, "psi_deg": 0.0,
-                "airspeed": 0.0,
-                "vertical_speed": 0.0,
-                "p_deg_s": 0.0, "q_deg_s": 0.0, "r_deg_s": 0.0,
-                "throttle": throttle if 'throttle' in locals() else 0.0,
-            }
+        
+        # Check if we can access basic properties - if not, JSBSim may not be properly initialized
+        test_prop = self._get_property("position/h-sl-ft")
+        if test_prop is None:
+            # Try alternative property names
+            test_prop = self._get_property("position/altitude-agl-ft")
+            if test_prop is None:
+                logger.warning("JSBSim properties not accessible - model may not be loaded correctly")
+                # Return zero state to trigger fallback
+                return {
+                    "x": 0.0, "y": 0.0, "z": 0.0,
+                    "altitude": 0.0,
+                    "phi_deg": 0.0, "theta_deg": 0.0, "psi_deg": 0.0,
+                    "airspeed": 0.0,
+                    "vertical_speed": 0.0,
+                    "p_deg_s": 0.0, "q_deg_s": 0.0, "r_deg_s": 0.0,
+                    "throttle": 0.0,
+                    "physics_engine": "manual",  # Indicates JSBSim failed
+                }
+        
+        # Try multiple property name variations
+        alt_ft = self._get_property("position/h-sl-ft") or self._get_property("position/altitude-agl-ft") or 0.0
+        long_deg = self._get_property("position/long-gc-deg") or 0.0
+        lat_deg = self._get_property("position/lat-gc-deg") or 0.0
+        
+        phi = self._get_property("attitude/phi-deg") or 0.0
+        theta = self._get_property("attitude/theta-deg") or 0.0
+        psi = self._get_property("attitude/psi-deg") or 0.0
+        
+        u_fps = self._get_property("velocities/u-fps") or 0.0
+        v_fps = self._get_property("velocities/v-fps") or 0.0
+        w_fps = self._get_property("velocities/w-fps") or 0.0
+        h_dot_fps = self._get_property("velocities/h-dot-fps") or 0.0
+        
+        p_rad = self._get_property("velocities/p-rad_sec") or self._get_property("velocities/p-rad-sec") or 0.0
+        q_rad = self._get_property("velocities/q-rad_sec") or self._get_property("velocities/q-rad-sec") or 0.0
+        r_rad = self._get_property("velocities/r-rad_sec") or self._get_property("velocities/r-rad-sec") or 0.0
+        
+        tas_fps = self._get_property("velocities/vt-fps") or 0.0
+        if tas_fps == 0.0:
+            # Fallback: calculate from body velocities
+            tas_fps = (u_fps**2 + v_fps**2 + w_fps**2)**0.5
+        
+        throttle = self._get_property("fcs/throttle-cmd-norm") or 0.0
+        
+        # Approximate local position from geodetic (simplified - use as relative to origin)
+        # For MVP, we can use a simple approximation or track relative to start
+        x_m = long_deg * 111320.0  # rough conversion: 1 deg longitude ≈ 111 km at equator
+        y_m = lat_deg * 111320.0
+        z_m = -alt_ft * 0.3048  # NED: z down, so altitude = -z
         
         return {
-            "x": x_ft * 0.3048,  # ft to m
-            "y": y_ft * 0.3048,
-            "z": z_ft * 0.3048,
+            "x": x_m,
+            "y": y_m,
+            "z": z_m,
             "altitude": alt_ft * 0.3048,  # AGL in meters
             "phi_deg": phi,
             "theta_deg": theta,
@@ -119,6 +158,7 @@ class JSBSimWrapper:
             "q_deg_s": q_rad * 57.2958,
             "r_deg_s": r_rad * 57.2958,
             "throttle": throttle,
+            "physics_engine": "jsbsim",
         }
 
     def reset(self):

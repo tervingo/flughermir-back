@@ -76,17 +76,26 @@ def _state_out_of_bounds(state: dict) -> bool:
 async def physics_loop():
     global _jsbsim, _state
     dt = 1.0 / 60.0
+    jsbsim_failed_count = 0
+    MAX_JSBSIM_FAILURES = 10  # After 10 consecutive failures, switch to manual physics
     
     # Initialize based on available physics engine
     if JSBSIM_AVAILABLE:
         try:
             _jsbsim = JSBSimWrapper("c172x")
             _jsbsim.initialize(altitude_m=0.0, heading_deg=0.0, airspeed_ms=0.0)
+            # Test if we can actually read properties
+            test_state = _jsbsim.get_state()
+            if test_state.get("altitude") == 0.0 and test_state.get("airspeed") == 0.0:
+                # Check if this is because properties aren't accessible
+                import logging
+                logging.warning("JSBSim initialized but properties not accessible, falling back to manual physics")
+                _jsbsim = None
         except Exception as e:
             import logging
             logging.error(f"JSBSim initialization failed: {e}")
             # Fall through to manual physics
-            pass
+            _jsbsim = None
     
     if not JSBSIM_AVAILABLE or _jsbsim is None:
         _state = get_initial_state()
@@ -103,9 +112,28 @@ async def physics_loop():
                     _control["rudder"]
                 )
                 if not _jsbsim.step():
-                    reset_sim()
+                    jsbsim_failed_count += 1
+                    if jsbsim_failed_count >= MAX_JSBSIM_FAILURES:
+                        import logging
+                        logging.error("JSBSim step failed repeatedly, switching to manual physics")
+                        _jsbsim = None
+                        _state = get_initial_state()
+                    else:
+                        reset_sim()
                     continue
                 state = _jsbsim.get_state()
+                # Check if state is valid (not all zeros due to property access failure)
+                if state.get("altitude") == 0.0 and state.get("airspeed") == 0.0 and state.get("phi_deg") == 0.0:
+                    jsbsim_failed_count += 1
+                    if jsbsim_failed_count >= MAX_JSBSIM_FAILURES:
+                        import logging
+                        logging.error("JSBSim returning invalid state, switching to manual physics")
+                        _jsbsim = None
+                        _state = get_initial_state()
+                    else:
+                        continue
+                else:
+                    jsbsim_failed_count = 0  # Reset failure count on success
             else:
                 # Manual physics fallback
                 if _state is None:

@@ -174,4 +174,5 @@ def state_to_telemetry(state: AircraftState) -> dict:
         "q_deg_s": round(state.q * 180 / 3.14159265, 2),  # pitch rate deg/s
         "r_deg_s": round(state.r * 180 / 3.14159265, 2),  # yaw rate deg/s
         "throttle": state.throttle,
+        "physics_engine": "manual",
     }
