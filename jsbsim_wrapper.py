@@ -3,8 +3,11 @@ JSBSim wrapper: interfaces with JSBSim flight dynamics model.
 Uses JSBSim Python bindings to run physics simulation.
 """
 
+import logging
 import os
 from jsbsim import FGFDMExec
+
+logger = logging.getLogger(__name__)
 
 
 class JSBSimWrapper:
@@ -15,28 +18,39 @@ class JSBSimWrapper:
         Initialize JSBSim with an aircraft model.
         Common models: c172x, f15, f16, etc.
         """
-        self.fdm = FGFDMExec()
-        self.fdm.load_model(aircraft)
-        self.dt = 1.0 / 60.0  # 60 Hz
-        self.fdm.set_dt(self.dt)  # Set timestep
-        self.initialized = False
+        try:
+            # FGFDMExec requires root directory path (empty string uses default)
+            root_dir = os.environ.get("JSBSIM_ROOT", "")
+            self.fdm = FGFDMExec(root_dir) if root_dir else FGFDMExec("")
+            self.fdm.load_model(aircraft)
+            self.dt = 1.0 / 60.0  # 60 Hz
+            self.fdm.set_dt(self.dt)  # Set timestep
+            self.initialized = False
+        except Exception as e:
+            logger.error(f"Failed to initialize JSBSim with aircraft {aircraft}: {e}")
+            raise
 
     def initialize(self, altitude_m: float = 0.0, heading_deg: float = 0.0, airspeed_ms: float = 0.0):
         """Initialize aircraft state (on runway, ready for takeoff)."""
-        # Set initial conditions
-        self.fdm["ic/h-sl-ft"] = altitude_m * 3.28084  # m to ft
-        self.fdm["ic/long-gc-deg"] = 0.0
-        self.fdm["ic/lat-gc-deg"] = 0.0
-        self.fdm["ic/psi-true-deg"] = heading_deg
-        self.fdm["ic/u-fps"] = airspeed_ms * 3.28084  # m/s to ft/s
-        self.fdm["ic/v-fps"] = 0.0
-        self.fdm["ic/w-fps"] = 0.0
-        self.fdm["ic/phi-deg"] = 0.0
-        self.fdm["ic/theta-deg"] = 0.0
-        self.fdm["ic/alpha-deg"] = 0.0
-        self.fdm["ic/beta-deg"] = 0.0
-        self.fdm.run_ic()
-        self.initialized = True
+        try:
+            # Set initial conditions
+            self.fdm["ic/h-sl-ft"] = altitude_m * 3.28084  # m to ft
+            self.fdm["ic/long-gc-deg"] = 0.0
+            self.fdm["ic/lat-gc-deg"] = 0.0
+            self.fdm["ic/psi-true-deg"] = heading_deg
+            self.fdm["ic/u-fps"] = airspeed_ms * 3.28084  # m/s to ft/s
+            self.fdm["ic/v-fps"] = 0.0
+            self.fdm["ic/w-fps"] = 0.0
+            self.fdm["ic/phi-deg"] = 0.0
+            self.fdm["ic/theta-deg"] = 0.0
+            self.fdm["ic/alpha-deg"] = 0.0
+            self.fdm["ic/beta-deg"] = 0.0
+            self.fdm.run_ic()
+            self.initialized = True
+        except Exception as e:
+            logger.error(f"Failed to initialize aircraft state: {e}")
+            self.initialized = False
+            raise
 
     def set_controls(self, throttle: float, elevator: float, aileron: float, rudder: float):
         """Set control surfaces (all normalized -1..1, throttle 0..1)."""
@@ -51,7 +65,8 @@ class JSBSimWrapper:
             return False
         try:
             return self.fdm.run()
-        except Exception:
+        except Exception as e:
+            logger.error(f"JSBSim step failed: {e}")
             return False
 
     def get_state(self) -> dict:
@@ -77,8 +92,9 @@ class JSBSimWrapper:
             # True airspeed (better than just u)
             tas_fps = self.fdm["velocities/vt-fps"]
             throttle = self.fdm["fcs/throttle-cmd-norm"]
-        except (KeyError, AttributeError) as e:
+        except (KeyError, AttributeError, TypeError) as e:
             # Fallback if properties don't exist
+            logger.warning(f"JSBSim property access failed, using fallback: {e}")
             return {
                 "x": 0.0, "y": 0.0, "z": 0.0,
                 "altitude": 0.0,
