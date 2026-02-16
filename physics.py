@@ -153,6 +153,14 @@ def state_to_telemetry(state: AircraftState) -> dict:
         if not isfinite(v_mag):
             v_mag = MAX_AIRSPEED_MS
         v_mag = min(v_mag, MAX_AIRSPEED_MS)
+    
+    # World vertical velocity (NED: z down, so vertical speed up = -w_world)
+    cphi, sphi = cos(state.phi), sin(state.phi)
+    cth, sth = cos(state.theta), sin(state.theta)
+    cpsi, spsi = cos(state.psi), sin(state.psi)
+    w_world = u * (-sth) + v * (sphi * cth) + w * (cphi * cth)
+    vertical_speed = -w_world  # m/s, positive = climbing
+    
     return {
         "x": state.x,
         "y": state.y,
@@ -161,5 +169,9 @@ def state_to_telemetry(state: AircraftState) -> dict:
         "theta_deg": round(state.theta * 180 / 3.14159265, 4),
         "psi_deg": round(state.psi * 180 / 3.14159265, 4),
         "airspeed": round(v_mag, 2),
+        "vertical_speed": round(vertical_speed, 2),  # m/s, positive = up
+        "p_deg_s": round(state.p * 180 / 3.14159265, 2),  # roll rate deg/s
+        "q_deg_s": round(state.q * 180 / 3.14159265, 2),  # pitch rate deg/s
+        "r_deg_s": round(state.r * 180 / 3.14159265, 2),  # yaw rate deg/s
         "throttle": state.throttle,
     }
