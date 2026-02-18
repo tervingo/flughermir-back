@@ -6,6 +6,7 @@ Uses JSBSim Python bindings to run physics simulation.
 import logging
 import os
 import tempfile
+import jsbsim as _jsbsim_pkg
 from jsbsim import FGFDMExec
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,13 @@ class JSBSimWrapper:
         Common models: c172x, f15, f16, etc.
         """
         try:
-            # FGFDMExec requires root directory path (empty string uses default)
-            root_dir = os.environ.get("JSBSIM_ROOT", "")
-            self.fdm = FGFDMExec(root_dir) if root_dir else FGFDMExec("")
+            # FGFDMExec requires the root directory containing aircraft/engine data.
+            # Fall back to the path bundled with the jsbsim pip package when the
+            # environment variable is not set.
+            root_dir = os.environ.get("JSBSIM_ROOT") or _jsbsim_pkg.get_default_root_dir()
+            self._root_dir = root_dir
+            self._aircraft = aircraft
+            self.fdm = FGFDMExec(root_dir)
             
             # Try to create the output file JSBSim expects (JSBout172B.csv)
             # This prevents the "unable to open file" error
@@ -133,34 +138,31 @@ class JSBSimWrapper:
             except:
                 pass
             
-            # Stabilize on ground by running multiple steps with zero controls
-            # This allows the aircraft to settle on the ground and stop bouncing
+            # Zero all controls before settling.
             self.fdm["fcs/throttle-cmd-norm"] = 0.0
             self.fdm["fcs/elevator-cmd-norm"] = 0.0
             self.fdm["fcs/aileron-cmd-norm"] = 0.0
             self.fdm["fcs/rudder-cmd-norm"] = 0.0
-            
-            # Run multiple steps to stabilize - check if on ground
-            settled = False
-            for i in range(30):  # More steps to ensure stability
+
+            # Let the landing-gear spring/damper model fully settle.
+            # 120 steps = 2 seconds at 60 Hz.  Do NOT break early: the aircraft
+            # starts at 0 ft AGL so alt_agl < 0.1 is true from step 1, which is
+            # exactly why the old early-break caused only 1 stabilisation step to
+            # run and left the gear oscillating.
+            for _ in range(120):
                 self.fdm.run()
-                # Check if aircraft is on ground (altitude AGL should be near zero)
-                try:
-                    alt_agl_ft = self.fdm["position/altitude-agl-ft"]
-                    if alt_agl_ft < 0.1:  # Very close to ground
-                        settled = True
-                        break  # Aircraft has settled
-                except (KeyError, AttributeError):
-                    pass  # Property may not exist, continue stabilizing
-            
-            # Log final state
+
+            # Log final resting state for diagnostics.
             try:
                 final_alt = self._get_property("position/altitude-agl-ft", 0.0)
-                final_vt = self._get_property("velocities/vt-fps", 0.0)
-                logger.info(f"JSBSim initialized: altitude AGL={final_alt*0.3048:.2f}m, speed={final_vt*0.3048:.2f}m/s, settled={settled}")
-            except:
+                final_vt  = self._get_property("velocities/vt-fps", 0.0)
+                logger.info(
+                    f"JSBSim settled: altitude AGL={final_alt * 0.3048:.2f} m, "
+                    f"speed={final_vt * 0.3048:.2f} m/s"
+                )
+            except Exception:
                 pass
-            
+
             self.initialized = True
             logger.info("JSBSim aircraft state initialized and stabilized successfully")
         except Exception as e:
@@ -306,6 +308,19 @@ class JSBSimWrapper:
                 self._logged_props.add(prop_name)
             return default
     
+    def _get_prop(self, *names, default=0.0):
+        """Return the value of the first property name that exists.
+
+        Unlike chaining with ``or``, this correctly handles a property whose
+        value happens to be 0.0 (which is falsy in Python but perfectly valid
+        for, e.g., altitude on the ground or a centred control surface).
+        """
+        for name in names:
+            val = self._get_property(name)
+            if val is not None:
+                return val
+        return default
+
     def list_available_properties(self, prefix: str = "fcs/") -> list:
         """List available properties with a given prefix (for debugging)."""
         # This is a helper for debugging - JSBSim doesn't have a direct way to list properties
@@ -331,70 +346,66 @@ class JSBSimWrapper:
     
     def get_state(self) -> dict:
         """Extract current aircraft state for telemetry."""
-        # JSBSim uses NED frame, feet, degrees
-        # Convert to SI units (meters, m/s, degrees)
-        
-        # Check if we can access basic properties - if not, JSBSim may not be properly initialized
-        test_prop = self._get_property("position/h-sl-ft")
-        if test_prop is None:
-            # Try alternative property names
-            test_prop = self._get_property("position/altitude-agl-ft")
-            if test_prop is None:
-                logger.warning("JSBSim properties not accessible - model may not be loaded correctly")
-                # Return zero state to trigger fallback
-                return {
-                    "x": 0.0, "y": 0.0, "z": 0.0,
-                    "altitude": 0.0,
-                    "phi_deg": 0.0, "theta_deg": 0.0, "psi_deg": 0.0,
-                    "airspeed": 0.0,
-                    "vertical_speed": 0.0,
-                    "p_deg_s": 0.0, "q_deg_s": 0.0, "r_deg_s": 0.0,
-                    "throttle": 0.0,
-                    "physics_engine": "manual",  # Indicates JSBSim failed
-                }
-        
-        # Try multiple property name variations
-        alt_ft = self._get_property("position/h-sl-ft") or self._get_property("position/altitude-agl-ft") or 0.0
-        long_deg = self._get_property("position/long-gc-deg") or 0.0
-        lat_deg = self._get_property("position/lat-gc-deg") or 0.0
-        
-        phi = self._get_property("attitude/phi-deg") or 0.0
-        theta = self._get_property("attitude/theta-deg") or 0.0
-        psi = self._get_property("attitude/psi-deg") or 0.0
-        
-        u_fps = self._get_property("velocities/u-fps") or 0.0
-        v_fps = self._get_property("velocities/v-fps") or 0.0
-        w_fps = self._get_property("velocities/w-fps") or 0.0
-        h_dot_fps = self._get_property("velocities/h-dot-fps") or 0.0
-        
-        p_rad = self._get_property("velocities/p-rad_sec") or self._get_property("velocities/p-rad-sec") or 0.0
-        q_rad = self._get_property("velocities/q-rad_sec") or self._get_property("velocities/q-rad-sec") or 0.0
-        r_rad = self._get_property("velocities/r-rad_sec") or self._get_property("velocities/r-rad-sec") or 0.0
-        
-        tas_fps = self._get_property("velocities/vt-fps") or 0.0
+        # JSBSim uses NED frame, feet, degrees — convert to SI (metres, m/s, degrees).
+
+        # Accessibility check: use explicit None comparison so a valid 0.0 (e.g.
+        # altitude on the ground) is not misread as "property missing".
+        if (self._get_property("position/h-sl-ft") is None
+                and self._get_property("position/altitude-agl-ft") is None):
+            logger.warning("JSBSim properties not accessible - model may not be loaded correctly")
+            return {
+                "x": 0.0, "y": 0.0, "z": 0.0,
+                "altitude": 0.0,
+                "phi_deg": 0.0, "theta_deg": 0.0, "psi_deg": 0.0,
+                "airspeed": 0.0,
+                "vertical_speed": 0.0,
+                "p_deg_s": 0.0, "q_deg_s": 0.0, "r_deg_s": 0.0,
+                "throttle": 0.0,
+                "physics_engine": "manual",  # signals fallback to caller
+            }
+
+        # All reads below use _get_prop so that a property value of exactly 0.0
+        # is returned as-is instead of falling through to the next candidate.
+        alt_ft   = self._get_prop("position/h-sl-ft", "position/altitude-agl-ft")
+        long_deg = self._get_prop("position/long-gc-deg")
+        lat_deg  = self._get_prop("position/lat-gc-deg")
+
+        phi   = self._get_prop("attitude/phi-deg")
+        theta = self._get_prop("attitude/theta-deg")
+        psi   = self._get_prop("attitude/psi-deg")
+
+        u_fps     = self._get_prop("velocities/u-fps")
+        v_fps     = self._get_prop("velocities/v-fps")
+        w_fps     = self._get_prop("velocities/w-fps")
+        h_dot_fps = self._get_prop("velocities/h-dot-fps")
+
+        # JSBSim property name uses underscore (p-rad_sec), not hyphen.
+        p_rad = self._get_prop("velocities/p-rad_sec", "velocities/p-rad-sec")
+        q_rad = self._get_prop("velocities/q-rad_sec", "velocities/q-rad-sec")
+        r_rad = self._get_prop("velocities/r-rad_sec", "velocities/r-rad-sec")
+
+        tas_fps  = self._get_prop("velocities/vt-fps")
         if tas_fps == 0.0:
-            # Fallback: calculate from body velocities
             tas_fps = (u_fps**2 + v_fps**2 + w_fps**2)**0.5
-        
-        throttle = self._get_property("fcs/throttle-cmd-norm") or 0.0
-        
-        # Approximate local position from geodetic (simplified - use as relative to origin)
-        # For MVP, we can use a simple approximation or track relative to start
-        x_m = long_deg * 111320.0  # rough conversion: 1 deg longitude ≈ 111 km at equator
-        y_m = lat_deg * 111320.0
-        z_m = -alt_ft * 0.3048  # NED: z down, so altitude = -z
-        
+
+        throttle = self._get_prop("fcs/throttle-cmd-norm")
+
+        # Approximate local position from geodetic coords relative to origin.
+        x_m = long_deg * 111320.0  # 1 deg lon ≈ 111 km at equator
+        y_m = lat_deg  * 111320.0
+        z_m = -alt_ft  * 0.3048    # NED: z down → altitude = -z
+
         return {
             "x": x_m,
             "y": y_m,
             "z": z_m,
-            "altitude": alt_ft * 0.3048,  # AGL in meters
+            "altitude": alt_ft * 0.3048,        # MSL in metres
             "phi_deg": phi,
             "theta_deg": theta,
             "psi_deg": psi,
-            "airspeed": tas_fps * 0.3048,  # true airspeed in m/s
-            "vertical_speed": -h_dot_fps * 0.3048,  # m/s, positive = climbing (h-dot is down)
-            "p_deg_s": p_rad * 57.2958,  # rad/s to deg/s
+            "airspeed": tas_fps * 0.3048,        # true airspeed m/s
+            "vertical_speed": h_dot_fps * 0.3048,  # h-dot > 0 means climbing
+            "p_deg_s": p_rad * 57.2958,
             "q_deg_s": q_rad * 57.2958,
             "r_deg_s": r_rad * 57.2958,
             "throttle": throttle,
@@ -402,11 +413,20 @@ class JSBSimWrapper:
         }
 
     def reset(self):
-        """Reset to initial state."""
+        """Hard reset: recreate the FDM for a guaranteed clean state.
+
+        Calling run_ic() on an active simulation does not fully clear internal
+        JSBSim state (engine RPM, gear contact forces, accumulated integrators).
+        Recreating FGFDMExec is the only reliable way to get a blank slate.
+        """
         try:
-            # Stop the simulation first
             self.initialized = False
-            # Reinitialize
+            self.fdm = FGFDMExec(self._root_dir)
+            self.fdm.load_model(self._aircraft)
+            self.fdm.set_dt(self.dt)
+            # Reset per-instance tracking state
+            self._bounce_count = 0
+            self._last_altitude = None
             self.initialize(altitude_m=0.0, heading_deg=0.0, airspeed_ms=0.0)
         except Exception as e:
             logger.error(f"Failed to reset JSBSim: {e}", exc_info=True)

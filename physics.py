@@ -37,6 +37,8 @@ CL_ALPHA = 4.0     # per radian
 CD0 = 0.035         # parasitic drag
 K = 0.03            # induced drag factor
 THRUST_MAX = 2800.0 # N — max thrust; 50% throttle ≈ 1400 N should balance ~45-50 m/s (162-180 km/h)
+ROLLING_MU = 0.02   # rolling friction coefficient on tarmac
+V_LOF      = 28.0   # lift-off speed (m/s) ≈ 100 km/h — aircraft cannot leave ground below this
 
 # Clamps to prevent divergence and overflow
 MAX_SPEED = 400.0          # m/s (hard ceiling for numerics)
@@ -67,6 +69,14 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
     # Lift acts perpendicular to velocity (approx along -Z when level), weight always down
     lift_z = lift * (state.u / v_mag) if v_mag > 0.1 else 0.0  # lift component along body Z (up = -Z)
     fz = -lift_z - drag_z + WEIGHT * cos(state.theta)  # Z down: -lift - drag_z + weight
+
+    # Ground roll friction: opposes forward motion while wheels are on the ground.
+    # Normal force decreases as lift builds, so friction fades naturally near take-off.
+    on_ground = (state.z >= 0)
+    if on_ground and v_mag > 0.1:
+        normal = max(0.0, WEIGHT * cos(state.theta) - lift)
+        fx -= ROLLING_MU * normal * (state.u / v_mag)
+
     ax = fx / MASS
     az = fz / MASS
     ay = 0.0
@@ -94,6 +104,10 @@ def update_physics(state: AircraftState, dt: float) -> AircraftState:
 
     # Ground: do not go below z=0. Zero vertical velocity when on ground.
     if state.z >= 0 and w_w > 0:
+        w_w = 0.0
+    # Minimum lift-off speed: wheels stay on the ground below V_LOF regardless of
+    # pitch/AoA so the aircraft must accelerate down the runway first.
+    if state.z >= 0 and v_mag < V_LOF and w_w < 0:
         w_w = 0.0
     z_new = state.z + w_w * dt
     if z_new > 0:
